@@ -10,7 +10,7 @@ fi
 input_video="$1"
 video_name=$(basename "$input_video")
 video_name_no_ext="${video_name%.*}"
-encoder="av1_qsv"
+encoder="hevc_qsv"
 global_quality=25
 min_output_size_mb=10
 log_file="/plexdb/plexlogs/${video_name_no_ext}_${encoder}_${global_quality}_encode_log.txt"
@@ -21,15 +21,16 @@ LOCK_FILE="/plexdb/plexlogs/plex_encoding.lock"
 LOCK_TIMEOUT=$((8 * 3600))
 LOCK_WAIT_INTERVAL=300
 
-# Ensure /plexlogs directory exists
+# Ensure directories exist
 mkdir -p /plexdb/plexlogs
+mkdir -p /plexdb/plexlogs/temp
 
-# Function to log messages
+# Logging function
 log_message() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$log_file"
 }
 
-# Function to check subtitle codec
+# Subtitle check function
 check_subtitle_codec() {
     local subtitle_info=$(ffprobe -v error -select_streams s -show_entries stream=codec_name,codec_tag_string -of csv=p=0 "$input_video")
     if [[ $subtitle_info == *"tx3g"* || $subtitle_info == *"text"* || $subtitle_info == *"mov_text"* ]]; then
@@ -39,13 +40,13 @@ check_subtitle_codec() {
     return 0
 }
 
-# Check if the input file exists
+# Validate input file
 if [ ! -f "$input_video" ]; then
     log_message "Error: Input file does not exist."
     exit 1
 fi
 
-# Attempt to acquire lock with timeout
+# Lock handling
 exec 100>$LOCK_FILE || exit 1
 lock_start_time=$(date +%s)
 while true; do
@@ -63,10 +64,10 @@ while true; do
     sleep $LOCK_WAIT_INTERVAL
 done
 
-# Start logging
+# Start encoding process
 log_message "Starting encoding process for $input_video"
 
-# Check if video is interlaced using MediaInfo
+# Deinterlace detection
 if mediainfo --Inform="Video;%ScanType%" "$input_video" | grep -q "Interlaced"; then
     log_message "Interlaced content detected. Enabling advanced deinterlacing."
     deinterlace_filter="-vf hwdownload,format=nv12,yadif=1:parity=auto,hwupload=extra_hw_frames=40"
@@ -75,30 +76,29 @@ else
     deinterlace_filter=""
 fi
 
-# Construct the ffmpeg command
+# Build FFmpeg command
 ffmpeg_command="ffmpeg -thread_queue_size 512 \
 -analyzeduration 200000000 -probesize 100000000 \
 -hwaccel qsv \
 -hwaccel_output_format qsv \
--extra_hw_frames 40 \
+-extra_hw_frames 64 \
 -i \"file:$input_video\""
 
-# Add deinterlacing if needed
+# Add deinterlacing filter if needed
 if [ -n "$deinterlace_filter" ]; then
     ffmpeg_command+=" $deinterlace_filter"
 fi
 
-# Video encoding parameters (validated working)
+# HEVC QSV encoding parameters
 ffmpeg_command+=" \
 -c:v $encoder \
 -global_quality $global_quality \
 -preset veryslow \
 -look_ahead_depth 40 \
 -extbrc 1 \
--adaptive_i 1 \
--adaptive_b 1 \
--b_strategy 1 \
--low_power 0 \
+-profile:v main \
+-load_plugin hevc_hw \
+-map 0 \
 -map_chapters 0 -map_metadata 0 \
 -movflags use_metadata_tags"
 
@@ -118,7 +118,7 @@ else
     ffmpeg_command+=" -c:s copy"
 fi
 
-# Output options
+# Output configuration
 ffmpeg_command+=" \
 -movflags +faststart \
 -max_muxing_queue_size 1024 \
@@ -126,11 +126,12 @@ ffmpeg_command+=" \
 -fps_mode cfr \
 \"file:$temp_output_file\""
 
-# Log and execute
+# Execute command
 log_message "Encoding command: $ffmpeg_command"
 log_message "Starting FFmpeg encoding process..."
 eval "$ffmpeg_command 2>&1 | tee -a \"$log_file\""
 
+# Handle encoding result
 if [ ${PIPESTATUS[0]} -eq 0 ]; then
     log_message "Encoding completed successfully."
 else
@@ -139,19 +140,20 @@ else
     exit 1
 fi
 
-# Check if temporary file was created
+# Validate output file
 if [ ! -f "$temp_output_file" ]; then
     log_message "Error: Temporary output file was not created."
     flock -u 100
     exit 1
 fi
 
-# Size comparison and replacement logic
+# File size comparison
 input_size_mb=$(du -m "$input_video" | cut -f1)
 output_size_mb=$(du -m "$temp_output_file" | cut -f1)
 size_change_percent=$(echo "scale=2; (($input_size_mb - $output_size_mb) / $input_size_mb) * 100" | bc)
 log_message "Input size: ${input_size_mb}MB | Output size: ${output_size_mb}MB | Change: ${size_change_percent}%"
 
+# File replacement logic
 if [ "$output_size_mb" -lt "$min_output_size_mb" ]; then
     log_message "Error: Output file too small (${output_size_mb}MB < ${min_output_size_mb}MB)"
     rm "$temp_output_file"
@@ -162,10 +164,12 @@ fi
 if (( $(echo "$size_change_percent > 0" | bc -l) )); then
     original_extension="${input_video##*.}"
     output_file="${input_video%.*}.mkv"
+    
     if [ "$original_extension" != "mkv" ]; then
         rm "$input_video"
         log_message "Removed original .${original_extension} file"
     fi
+    
     mv "$temp_output_file" "$output_file"
     log_message "Replaced with encoded .mkv version"
 else
