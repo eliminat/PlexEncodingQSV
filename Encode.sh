@@ -29,6 +29,12 @@ log_message() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$log_file"
 }
 
+# Check if the input file exists
+if [ ! -f "$input_video" ]; then
+    log_message "Error: Input file does not exist."
+    exit 1
+fi
+
 # Function to check subtitle codec
 check_subtitle_codec() {
     local subtitle_info=$(ffprobe -v error -select_streams s -show_entries stream=codec_name,codec_tag_string -of csv=p=0 "$input_video")
@@ -39,11 +45,31 @@ check_subtitle_codec() {
     return 0
 }
 
-# Check if the input file exists
-if [ ! -f "$input_video" ]; then
-    log_message "Error: Input file does not exist."
-    exit 1
+# Find all English audio stream indices (type-specific)
+readarray -t eng_audio_idxs < <(ffprobe -v error -select_streams a -show_entries stream=index:stream_tags=language -of csv=p=0 "$input_video" | awk -F',' '$2=="eng"{print NR-1}')
+# Find first Japanese audio stream index (type-specific)
+jpn_audio_idx=$(ffprobe -v error -select_streams a -show_entries stream=index:stream_tags=language -of csv=p=0 "$input_video" | awk -F',' '$2=="jpn"{print NR-1; exit}')
+# Find all English subtitle stream indices (type-specific)
+readarray -t eng_sub_idxs < <(ffprobe -v error -select_streams s -show_entries stream=index:stream_tags=language -of csv=p=0 "$input_video" | awk -F',' '$2=="eng"{print NR-1}')
+
+# Build map options
+map_opts="-map 0:v:0"
+# Check if English audio streams array is empty
+if [ ${#eng_audio_idxs[@]} -eq 0 ]; then
+    # No English audio streams found, include primary audio stream
+    map_opts+=" -map 0:a:0"
+    log_message "No English audio streams found. Including primary audio stream (0:a:0)"
+else
+    # Add all detected English audio streams
+    for idx in "${eng_audio_idxs[@]}"; do
+        map_opts+=" -map 0:a:$idx"
+    done
 fi
+
+[ -n "$jpn_audio_idx" ] && map_opts+=" -map 0:a:$jpn_audio_idx"
+for idx in "${eng_sub_idxs[@]}"; do
+    map_opts+=" -map 0:s:$idx"
+done
 
 # Attempt to acquire lock with timeout
 exec 100>$LOCK_FILE || exit 1
@@ -69,18 +95,18 @@ log_message "Starting encoding process for $input_video"
 # Check if video is interlaced using MediaInfo
 if mediainfo --Inform="Video;%ScanType%" "$input_video" | grep -q "Interlaced"; then
     log_message "Interlaced content detected. Enabling advanced deinterlacing."
-    deinterlace_filter="-vf hwdownload,format=nv12,yadif=1:parity=auto,hwupload=extra_hw_frames=40"
+    deinterlace_filter="-vf deinterlace_qsv"
 else
     log_message "Progressive content detected. Skipping deinterlacing."
-    deinterlace_filter=""
 fi
 
 # Construct the ffmpeg command
-ffmpeg_command="ffmpeg -thread_queue_size 512 \
--analyzeduration 200000000 -probesize 100000000 \
+ffmpeg_command="ffmpeg -thread_queue_size 1024 \
+-analyzeduration 300000000 -probesize 300000000 \
 -hwaccel qsv \
 -hwaccel_output_format qsv \
--extra_hw_frames 40 \
+-extra_hw_frames 88 \
+-async_depth 16 \
 -i \"file:$input_video\""
 
 # Add deinterlacing if needed
@@ -93,18 +119,22 @@ ffmpeg_command+=" \
 -c:v $encoder \
 -global_quality $global_quality \
 -preset veryslow \
--look_ahead_depth 40 \
 -extbrc 1 \
+-look_ahead_depth 88 \
 -adaptive_i 1 \
 -adaptive_b 1 \
 -b_strategy 1 \
+-temporal_aq 1 -spatial_aq 1 \
+-bf 7 \
+-g 180 \
 -low_power 0 \
+$map_opts \
 -map_chapters 0 -map_metadata 0 \
 -movflags use_metadata_tags"
 
 # Audio processing
 ffmpeg_command+=" \
--filter:a 'aresample=async=1000,pan=stereo|FL=0.5*FC+0.707*FL+0.707*BL+0.5*LFE|FR=0.5*FC+0.707*FR+0.707*BR+0.5*LFE,volume=1.50' \
+-filter:a 'aresample=async=1000,pan=stereo|FL=0.5*FC+0.707*FL+0.707*BL+0.5*LFE|FR=0.5*FC+0.707*FR+0.707*BR+0.5*LFE,afftdn=nr=20:nf=-50:track_noise=1,loudnorm=I=-16:LRA=11:TP=-2,volume=1.5' \
 -c:a aac \
 -b:a 256k \
 -ac 2 \
@@ -121,7 +151,7 @@ fi
 # Output options
 ffmpeg_command+=" \
 -movflags +faststart \
--max_muxing_queue_size 1024 \
+-max_muxing_queue_size 4096 \
 -err_detect aggressive \
 -fps_mode cfr \
 \"file:$temp_output_file\""
@@ -135,6 +165,19 @@ if [ ${PIPESTATUS[0]} -eq 0 ]; then
     log_message "Encoding completed successfully."
 else
     log_message "Error: Encoding failed."
+    flock -u 100
+    exit 1
+fi
+
+
+# New duration check added here
+input_duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$input_video")
+output_duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$temp_output_file")
+duration_margin=5  # Allow 5-second difference for rounding
+
+if (( $(echo "$output_duration < $input_duration - $duration_margin" | bc -l) )); then
+    log_message "Encoding interrupted - output duration too short (Input: ${input_duration}s vs Output: ${output_duration}s)"
+    rm "$temp_output_file"
     flock -u 100
     exit 1
 fi
