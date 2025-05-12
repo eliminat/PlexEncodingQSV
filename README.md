@@ -20,6 +20,8 @@ This is the primary encoding script that processes individual video files using 
 - Implements file locking to prevent concurrent encoding jobs
 - Only replaces original files if the new version is smaller
 - Generates detailed logs of the encoding process
+- Checks video duration to ensure complete encoding
+- Implements advanced error detection
 
 ### 2. Encode_HEVC.sh
 
@@ -48,7 +50,7 @@ A utility script that recursively processes all video files of a specified forma
 - FFmpeg compiled with Intel QSV support
 - MediaInfo for interlaced content detection
 - BC (basic calculator) for percentage calculations
-- At least 10MB of free space in the "/plexdb/plexlogs/temp" directory
+- At least 10MB of free space in the `/plexdb/plexlogs/temp` directory
 
 ## Usage
 
@@ -56,29 +58,21 @@ A utility script that recursively processes all video files of a specified forma
 
 To encode a single video file using AV1:
 
-```bash
-/path/to/Encode.sh /path/to/your/video.mp4
-```
+    /path/to/Encode.sh /path/to/your/video.mp4
 
 To encode using HEVC instead:
 
-```bash
-/path/to/Encode_HEVC.sh /path/to/your/video.mp4
-```
+    /path/to/Encode_HEVC.sh /path/to/your/video.mp4
 
 ### Processing Multiple Files
 
 To encode all MKV files in the current directory and subdirectories:
 
-```bash
-/path/to/Encode_Dir.sh
-```
+    /path/to/Encode_Dir.sh
 
 To process files with a different extension (e.g., MP4):
 
-```bash
-/path/to/Encode_Dir.sh mp4
-```
+    /path/to/Encode_Dir.sh mp4
 
 ## How It Works
 
@@ -89,7 +83,7 @@ To process files with a different extension (e.g., MP4):
 5. Incompatible subtitle formats are converted to SRT for better compatibility.
 6. After encoding, the script compares the size of the original and encoded files.
 7. If the encoded file is smaller (and above a minimum size threshold), it replaces the original file; otherwise, it keeps the original and deletes the encoded version.
-8. Detailed logs are generated throughout the process in the "/plexdb/plexlogs" directory.
+8. Detailed logs are generated throughout the process in the `/plexdb/plexlogs` directory.
 
 ## Encoding Parameters
 
@@ -97,14 +91,19 @@ Both scripts use carefully optimized encoding parameters:
 
 ### AV1 Encoding (Encode.sh)
 - Encoder: av1_qsv
-- Quality: global_quality 25
+- Global quality: 25
 - Preset: veryslow
-- Look-ahead depth: 40
 - Extended bitrate control: enabled
+- Look-ahead depth: 88
+- Adaptive I-frames and B-frames: enabled
+- Temporal and spatial adaptive quantization: enabled
+- B-frames: 7
+- GOP size: 180
+- Low power mode: disabled
 
 ### HEVC Encoding (Encode_HEVC.sh)
 - Encoder: hevc_qsv
-- Quality: global_quality 25
+- Global quality: 25
 - Preset: veryslow
 - Profile: main
 - Look-ahead depth: 40
@@ -114,9 +113,11 @@ Both scripts use carefully optimized encoding parameters:
 
 - The scripts use a locking mechanism to prevent multiple encoding jobs from running simultaneously, which could overload your system.
 - If an encoding job fails to acquire the lock after 8 hours of waiting, it will exit automatically.
+- The scripts verify output duration matches input duration to ensure complete encoding.
 - Original files are only replaced if the encoded version is smaller and above a minimum size threshold (10MB).
 - The scripts convert all output files to MKV container format.
-- Detailed logs are stored in "/plexdb/plexlogs" with filenames that include the original filename, encoder, and quality settings[1][3].
+- Detailed logs are stored in `/plexdb/plexlogs` with filenames that include the original filename, encoder, and quality settings.
+- Error detection is set to "aggressive" to catch potential issues during the encoding process.
 
 ## Customization
 
@@ -126,3 +127,23 @@ You may want to adjust the following parameters in the scripts for your specific
 - `min_output_size_mb`: Minimum acceptable size for encoded files
 - `LOCK_TIMEOUT`: Maximum wait time for acquiring the encoding lock
 - Audio encoding parameters like bitrate and normalization levels
+- Thread queue size and hardware acceleration parameters for specific hardware configurations
+
+## Using as a Plex Post-Processing Script
+
+These scripts can be used as post-processing scripts in Plex DVR settings:
+
+1. Set up Plex DVR to record your TV shows
+2. In the DVR settings, find the post-processing script option
+3. Enter the full path to the Encode.sh or Encode_HEVC.sh script
+4. Plex will automatically pass recorded shows to the script for processing after recording is complete
+
+This allows automatic conversion of recorded content to save space while maintaining quality.
+
+## Troubleshooting
+
+- If encoding fails, check the log files in `/plexdb/plexlogs/` for specific error messages
+- Ensure your Intel CPU supports QSV for the codec you're trying to use
+- Verify that FFmpeg is compiled with proper QSV support
+- For systems with multiple GPUs, you may need to specify which GPU to use
+```
