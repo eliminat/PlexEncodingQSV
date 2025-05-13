@@ -20,8 +20,12 @@ if [ -n "$2" ]; then
     fi
 fi
 
-# Recursively find all files, handle all special characters robustly
-find "$folder" -type f -print0 | while IFS= read -r -d '' file; do
+# Use a temporary file to store the file list
+tmpfile=$(mktemp)
+find "$folder" -type f -print0 > "$tmpfile"
+
+# Process each file from the temp file
+while IFS= read -r -d '' file; do
     # Check if file is readable
     [[ -r "$file" ]] || continue
 
@@ -41,4 +45,7 @@ find "$folder" -type f -print0 | while IFS= read -r -d '' file; do
             echo "$file"
         fi
     fi
-done
+done < "$tmpfile"
+
+# Clean up the temporary file
+rm -f "$tmpfile"
