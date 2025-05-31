@@ -8,9 +8,8 @@ fi
 
 # Universal filename handling with protocol prefix and escaping
 input_video="$1"
-escaped_input="${input_video//:/\\:}"  # Escape colon characters
-safe_input="file:$input_video"       # Add protocol prefix
-
+escaped_input="${input_video//:/\\:}"
+safe_input="file:$input_video"
 video_name=$(basename "$input_video")
 video_name_no_ext="${video_name%.*}"
 encoder="av1_qsv"
@@ -24,8 +23,17 @@ LOCK_FILE="/plexdb/plexlogs/plex_encoding.lock"
 LOCK_TIMEOUT=$((8 * 3600))
 LOCK_WAIT_INTERVAL=300
 
-# Ensure /plexlogs directory exists
-mkdir -p /plexdb/plexlogs
+# Cleanup function for early termination or script exit
+cleanup() {
+    echo "Trap triggered: cleaning up before exit"
+    [ -f "$temp_output_file" ] && rm -f "$temp_output_file"
+    flock -u 100 2>/dev/null
+}
+trap cleanup EXIT INT TERM
+
+
+# Ensure directories exist
+mkdir -p /plexdb/plexlogs /plexdb/plexlogs/temp
 
 # Function to log messages
 log_message() {
@@ -48,51 +56,76 @@ check_subtitle_codec() {
     return 0
 }
 
-# Stream detection with corrected parsing
-log_message "Starting stream analysis for $safe_input"
+# Build filter complex for audio streams
+filter_complex_str=""
+map_audio_str=""
+stream_count=0
 
-# Audio stream detection with stream-type indices
-readarray -t eng_audio_idxs < <(
-    ffprobe -v error -select_streams a \
-    -show_entries stream=index:stream_tags=language \
-    -of csv=p=0 "$safe_input" \
-    | awk -F',' '$2=="eng"{print NR-1}'
-)
+process_audio_stream() {
+    local idx="$1"
+    filter_complex_str+="[0:a:$idx]aresample=async=1000:min_comp=0.01:comp_duration=1,pan=stereo|FL=0.5*FC+0.707*FL+0.707*BL+0.5*LFE|FR=0.5*FC+0.707*FR+0.707*BR+0.5*LFE,afftdn=nr=20:nf=-50:track_noise=1,loudnorm=I=-16:LRA=11:TP=-2,volume=1.5[a$stream_count];"
+    map_audio_str+="-map [a$stream_count] "
+    ((stream_count++))
+}
 
-# Subtitle stream detection with stream-type indices
-readarray -t eng_sub_idxs < <(
-    ffprobe -v error -select_streams s \
-    -show_entries stream=index:stream_tags=language \
-    -of csv=p=0 "$safe_input" \
-    | awk -F',' '$2=="eng"{print NR-1}'
-)
+# Process English audio streams
+for idx in "${eng_audio_idxs[@]}"; do
+    process_audio_stream "$idx"
+done
+
+# Process Japanese audio stream if present
+if [ -n "$jpn_audio_idx" ]; then
+    process_audio_stream "$jpn_audio_idx"
+fi
+
+# Fallback to default audio stream 0 if none found
+if [ ${#eng_audio_idxs[@]} -eq 0 ] && [ -z "$jpn_audio_idx" ]; then
+    log_message "No English/Japanese audio. Using default stream 0"
+    process_audio_stream "0"
+fi
+
+# Remove trailing semicolon from filter_complex
+filter_complex_str="${filter_complex_str%;}"
 
 # Stream mapping configuration
-map_opts="-map 0:v:0"
-if [ ${#eng_audio_idxs[@]} -eq 0 ]; then
-    map_opts+=" -map 0:a:0"
-    log_message "No English audio streams found. Including primary audio stream (0:a:0)"
-else
-    for idx in "${eng_audio_idxs[@]}"; do
-        map_opts+=" -map 0:a:$idx"
-    done
+map_opts="-map 0:v:0 $map_audio_str"
+
+# Detect subtitle streams (English or undefined language)
+subtitle_streams_found=false
+
+# Check for English subtitles first
+if ffprobe -v error -select_streams s -show_entries stream=index:stream_tags=language \
+-of csv=p=0 "$safe_input" | grep -q ',eng'; then
+    map_opts+=" -map 0:s:m:language:eng"
+    log_message "English subtitles detected and will be mapped."
+    subtitle_streams_found=true
 fi
 
-[ -n "$jpn_audio_idx" ] && map_opts+=" -map 0:a:$jpn_audio_idx"
-
-# Subtitle mapping with validation
-if [ ${#eng_sub_idxs[@]} -gt 0 ]; then
-    for idx in "${eng_sub_idxs[@]}"; do
-        map_opts+=" -map 0:s:$idx"
-    done
-else
-    log_message "No English subtitles detected"
+# If no English subtitles, check for undefined language subtitles
+if [ "$subtitle_streams_found" = false ]; then
+    if ffprobe -v error -select_streams s -show_entries stream=index:stream_tags=language \
+    -of csv=p=0 "$safe_input" | grep -q ',und\|,$'; then
+        map_opts+=" -map 0:s:m:language:und"
+        log_message "Undefined language subtitles detected and will be mapped."
+        subtitle_streams_found=true
+    fi
 fi
 
-# Lock acquisition and encoding process
+# If still no subtitles found, map all subtitle streams as fallback
+if [ "$subtitle_streams_found" = false ]; then
+    if ffprobe -v error -select_streams s -show_entries stream=index \
+    -of csv=p=0 "$safe_input" | grep -q '^[0-9]'; then
+        map_opts+=" -map 0:s"
+        log_message "Subtitle streams detected (unknown language) and will be mapped."
+    else
+        log_message "No subtitle streams detected; skipping subtitle mapping."
+    fi
+fi
+
+
+# Lock acquisition
 exec 100>$LOCK_FILE || exit 1
 lock_start_time=$(date +%s)
-
 while true; do
     if flock -n 100; then
         log_message "Lock acquired. Starting encoding process for $safe_input"
@@ -117,34 +150,35 @@ else
     log_message "Progressive content detected. Skipping deinterlacing."
 fi
 
-# FFmpeg command construction with protocol handling
+# FFmpeg command construction
 ffmpeg_command="ffmpeg -thread_queue_size 1024 \
-    -analyzeduration 300M -probesize 300M \
-    -hwaccel qsv -hwaccel_output_format qsv \
-    -extra_hw_frames 88 -async_depth 16 \
-    -i \"$safe_input\""
+-analyzeduration 300M -probesize 300M \
+-hwaccel qsv -hwaccel_output_format qsv \
+-extra_hw_frames 88 -async_depth 16 \
+-i \"$safe_input\""
 
 [ -n "$deinterlace_filter" ] && ffmpeg_command+=" $deinterlace_filter"
 
 ffmpeg_command+=" \
-    -c:v $encoder \
-    -global_quality:v $global_quality \
-    -preset veryslow \
-    -extbrc 1 \
-    -look_ahead_depth 88 \
-    -adaptive_i 1 -adaptive_b 1 \
-    -b_strategy 1 \
-    -bf 7 -refs 5 -g 180 -low_power 0 \
-    -tile_cols 2 -tile_rows 2 \
-    $map_opts \
-    -map_chapters 0 -map_metadata 0 \
-    -movflags use_metadata_tags"
+-c:v $encoder \
+-global_quality:v $global_quality \
+-preset veryslow \
+-extbrc 1 \
+-look_ahead_depth 88 \
+-adaptive_i 1 -adaptive_b 1 \
+-b_strategy 1 \
+-bf 7 -refs 5 -g 180 -low_power 0 \
+-tile_cols 2 -tile_rows 2 \
+$map_opts \
+-map_chapters 0 -map_metadata 0 \
+-movflags use_metadata_tags"
 
 # Audio processing
-ffmpeg_command+=" \
-    -filter:a 'aresample=async=1000:min_comp=0.01:comp_duration=1,pan=stereo|FL=0.5*FC+0.707*FL+0.707*BL+0.5*LFE|FR=0.5*FC+0.707*FR+0.707*BR+0.5*LFE,afftdn=nr=20:nf=-50:track_noise=1,loudnorm=I=-16:LRA=11:TP=-2,volume=1.5' \
-    -c:a libopus -b:a 128k -vbr on -application audio"
-    # -c:a aac -b:a 256k -ac 2 -ar 48000"
+if [ -n "$filter_complex_str" ]; then
+    ffmpeg_command+=" -filter_complex \"$filter_complex_str\""
+fi
+ffmpeg_command+=" -c:a libopus -b:a 128k -vbr on -application audio"
+
 
 # Subtitle handling
 if ! check_subtitle_codec; then
@@ -154,32 +188,33 @@ else
     ffmpeg_command+=" -c:s copy"
 fi
 
-# Final output configuration with escaped filename
+# Final output configuration
 escaped_output="${temp_output_file//:/\\:}"
 ffmpeg_command+=" \
-    -movflags +faststart \
-    -max_muxing_queue_size 4096 \
-    -err_detect aggressive \
-    -fps_mode cfr \
-    \"file:$temp_output_file\""
+-movflags +faststart \
+-max_muxing_queue_size 4096 \
+-err_detect aggressive \
+-fps_mode cfr \
+\"file:$temp_output_file\""
 
 log_message "Executing: $ffmpeg_command"
 eval "$ffmpeg_command 2>&1 | tee -a \"$log_file\""
 
-# Duration validation with protocol handling
+
+
+# Duration validation
 input_duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$safe_input")
-escaped_output="file:${temp_output_file//:/\\:}"  # Protocol-safe temp file
-output_duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$temp_output_file")
-duration_margin=5  # Allow 5-second difference for rounding
+output_duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "file:$temp_output_file")
+duration_margin=5
 
 if (( $(echo "$output_duration < $input_duration - $duration_margin" | bc -l) )); then
     log_message "Encoding interrupted - output duration too short (Input: ${input_duration}s vs Output: ${output_duration}s)"
-    rm "$temp_output_file"  # Use original filename for filesystem operations
+    rm "$temp_output_file"
     flock -u 100
     exit 1
 fi
 
-# Size comparison and replacement logic
+# Size comparison
 input_size_mb=$(du -m "$input_video" | cut -f1)
 output_size_mb=$(du -m "$temp_output_file" | cut -f1)
 size_change_percent=$(echo "scale=2; (($input_size_mb - $output_size_mb) / $input_size_mb) * 100" | bc)
@@ -192,24 +227,25 @@ if [ "$output_size_mb" -lt "$min_output_size_mb" ]; then
     exit 1
 fi
 
+# Final file handling
+# Post-processing metadata correction
+log_message "Adding track statistics tags"
+original_extension="${input_video##*.}"
+output_file="${input_video%.*}.mkv"
+
 if (( $(echo "$size_change_percent > 0" | bc -l) )); then
-    original_extension="${input_video##*.}"
-    output_file="${input_video%.*}.mkv"
-    
     if [ "$original_extension" != "mkv" ]; then
         rm "$input_video"
         log_message "Removed original .${original_extension} file"
     fi
-    
-    mv "$temp_output_file" "$output_file"  # Protocol-safe move
+    mkvpropedit "$temp_output_file" --add-track-statistics-tags
+    mv "$temp_output_file" "$output_file"
     log_message "Replaced with encoded .mkv version"
 else
     log_message "Encoded file not smaller - keeping original"
     rm "$temp_output_file"
 fi
 
-
 log_message "Encoding process completed for $input_video"
 flock -u 100
 exit 0
-

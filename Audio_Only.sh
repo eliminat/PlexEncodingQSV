@@ -49,42 +49,73 @@ check_subtitle_codec() {
 # Stream detection with corrected parsing
 log_message "Starting stream analysis for $safe_input"
 
-# Audio stream detection with stream-type indices
-readarray -t eng_audio_idxs < <(
-    ffprobe -v error -select_streams a \
-    -show_entries stream=index:stream_tags=language \
-    -of csv=p=0 "$safe_input" \
-    | awk -F',' '$2=="eng"{print NR-1}'
-)
+# Build filter complex for audio streams
+filter_complex_str=""
+map_audio_str=""
+stream_count=0
 
-# Subtitle stream detection with stream-type indices
-readarray -t eng_sub_idxs < <(
-    ffprobe -v error -select_streams s \
-    -show_entries stream=index:stream_tags=language \
-    -of csv=p=0 "$safe_input" \
-    | awk -F',' '$2=="eng"{print NR-1}'
-)
+process_audio_stream() {
+    local idx="$1"
+    filter_complex_str+="[0:a:$idx]aresample=async=1000:min_comp=0.01:comp_duration=1,pan=stereo|FL=0.5*FC+0.707*FL+0.707*BL+0.5*LFE|FR=0.5*FC+0.707*FR+0.707*BR+0.5*LFE,afftdn=nr=20:nf=-50:track_noise=1,loudnorm=I=-16:LRA=11:TP=-2,volume=1.5[a$stream_count];"
+    map_audio_str+="-map [a$stream_count] "
+    ((stream_count++))
+}
+
+# Process English audio streams
+for idx in "${eng_audio_idxs[@]}"; do
+    process_audio_stream "$idx"
+done
+
+# Process Japanese audio stream if present
+if [ -n "$jpn_audio_idx" ]; then
+    process_audio_stream "$jpn_audio_idx"
+fi
+
+# Fallback to default audio stream 0 if none found
+if [ ${#eng_audio_idxs[@]} -eq 0 ] && [ -z "$jpn_audio_idx" ]; then
+    log_message "No English/Japanese audio. Using default stream 0"
+    process_audio_stream "0"
+fi
+
+# Remove trailing semicolon from filter_complex
+filter_complex_str="${filter_complex_str%;}"
 
 # Stream mapping configuration
-map_opts="-map 0:v:0"
+map_opts="-map 0:v:0 $map_audio_str"
 
-if [ ${#eng_audio_idxs[@]} -eq 0 ]; then
-    map_opts+=" -map 0:a:0"
-    log_message "No English audio streams found. Including primary audio stream (0:a:0)"
-else
-    for idx in "${eng_audio_idxs[@]}"; do
-        map_opts+=" -map 0:a:$idx"
-    done
+# Detect subtitle streams (English or undefined language)
+subtitle_streams_found=false
+
+# Check for English subtitles first
+if ffprobe -v error -select_streams s -show_entries stream=index:stream_tags=language \
+-of csv=p=0 "$safe_input" | grep -q ',eng'; then
+    map_opts+=" -map 0:s:m:language:eng"
+    log_message "English subtitles detected and will be mapped."
+    subtitle_streams_found=true
 fi
 
-# Subtitle mapping with validation
-if [ ${#eng_sub_idxs[@]} -gt 0 ]; then
-    for idx in "${eng_sub_idxs[@]}"; do
-        map_opts+=" -map 0:s:$idx"
-    done
-else
-    log_message "No English subtitles detected"
+# If no English subtitles, check for undefined language subtitles
+if [ "$subtitle_streams_found" = false ]; then
+    if ffprobe -v error -select_streams s -show_entries stream=index:stream_tags=language \
+    -of csv=p=0 "$safe_input" | grep -q ',und\|,$'; then
+        map_opts+=" -map 0:s:m:language:und"
+        log_message "Undefined language subtitles detected and will be mapped."
+        subtitle_streams_found=true
+    fi
 fi
+
+# If still no subtitles found, map all subtitle streams as fallback
+if [ "$subtitle_streams_found" = false ]; then
+    if ffprobe -v error -select_streams s -show_entries stream=index \
+    -of csv=p=0 "$safe_input" | grep -q '^[0-9]'; then
+        map_opts+=" -map 0:s"
+        log_message "Subtitle streams detected (unknown language) and will be mapped."
+    else
+        log_message "No subtitle streams detected; skipping subtitle mapping."
+    fi
+fi
+
+
 
 # Lock acquisition and encoding process
 exec 100>$LOCK_FILE || exit 1
@@ -119,9 +150,10 @@ $map_opts \
 -movflags use_metadata_tags"
 
 # Audio processing
-ffmpeg_command+=" \
--filter:a 'aresample=async=1000:min_comp=0.01:comp_duration=1,pan=stereo|FL=0.5*FC+0.707*FL+0.707*BL+0.5*LFE|FR=0.5*FC+0.707*FR+0.707*BR+0.5*LFE,afftdn=nr=20:nf=-50:track_noise=1,loudnorm=I=-16:LRA=11:TP=-2,volume=1.5' \
--c:a libopus -b:a 128k -vbr on -application audio"
+if [ -n "$filter_complex_str" ]; then
+    ffmpeg_command+=" -filter_complex \"$filter_complex_str\""
+fi
+ffmpeg_command+=" -c:a libopus -b:a 128k -vbr on -application audio"
 
 # Subtitle handling
 if ! check_subtitle_codec; then
@@ -176,6 +208,7 @@ if (( $(echo "$size_change_percent > 0" | bc -l) )); then
         rm "$input_video"
         log_message "Removed original .${original_extension} file"
     fi
+    mkvpropedit "$temp_output_file" --add-track-statistics-tags
     mv "$temp_output_file" "$output_file"
     log_message "Replaced with encoded .mkv version"
 else
