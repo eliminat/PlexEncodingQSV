@@ -56,10 +56,31 @@ stream_count=0
 
 process_audio_stream() {
     local idx="$1"
-    filter_complex_str+="[0:a:$idx]aresample=async=1000:min_comp=0.01:comp_duration=1,pan=stereo|FL=0.5*FC+0.707*FL+0.707*BL+0.5*LFE|FR=0.5*FC+0.707*FR+0.707*BR+0.5*LFE,afftdn=nr=20:nf=-50:track_noise=1,loudnorm=I=-16:LRA=11:TP=-2,volume=1.5[a$stream_count];"
+    filter_complex_str+="[0:a:$idx]aresample=async=1000:min_comp=0.01:comp_duration=1,"
+    filter_complex_str+="pan=stereo|FL=0.5*FC+0.707*FL+0.707*BL+0.5*LFE|FR=0.5*FC+0.707*FR+0.707*BR+0.5*LFE,"
+    filter_complex_str+="afftdn=nr=20:nf=-50:track_noise=1,"
+    filter_complex_str+="loudnorm=I=-16:LRA=11:TP=-5.5,"
+    filter_complex_str+="volume=1.5,"
+    filter_complex_str+="alimiter=level=disabled:limit=-0.5dB:attack=7:release=100[a$stream_count];"
     map_audio_str+="-map [a$stream_count] "
     ((stream_count++))
 }
+
+# Detect audio streams by language preference
+# Find all English audio stream indices using actual stream indexes
+readarray -t eng_audio_idxs < <(
+    ffprobe -v error -select_streams a \
+    -show_entries stream=index:stream_tags=language \
+    -of csv=p=0 "$input_video" | awk -F',' '$2=="eng"{print NR-1}'
+)
+
+# Find first Japanese audio stream index using actual stream index
+jpn_audio_idx=$(
+    ffprobe -v error -select_streams a \
+    -show_entries stream=index:stream_tags=language \
+    -of csv=p=0 "$input_video" | awk -F',' '$2=="jpn"{print NR-1; exit}'
+)
+
 
 # Process English audio streams
 for idx in "${eng_audio_idxs[@]}"; do
@@ -141,6 +162,7 @@ log_message "Skipping deinterlacing; video will be copied."
 # FFmpeg command construction with protocol handling
 ffmpeg_command="ffmpeg -thread_queue_size 1024 \
 -analyzeduration 300M -probesize 300M \
+-fflags +genpts \
 -i \"$safe_input\""
 
 ffmpeg_command+=" \
