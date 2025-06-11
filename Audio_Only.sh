@@ -56,15 +56,27 @@ stream_count=0
 
 process_audio_stream() {
     local idx="$1"
-    filter_complex_str+="[0:a:$idx]aresample=async=1000:min_comp=0.01:comp_duration=1,"
-    filter_complex_str+="pan=stereo|FL=0.5*FC+0.707*FL+0.707*BL+0.5*LFE|FR=0.5*FC+0.707*FR+0.707*BR+0.5*LFE,"
-    filter_complex_str+="afftdn=nr=20:nf=-50:track_noise=1,"
-    filter_complex_str+="loudnorm=I=-16:LRA=11:TP=-5.5,"
-    filter_complex_str+="volume=1.5,"
-    filter_complex_str+="alimiter=level=disabled:limit=-0.5dB:attack=7:release=100[a$stream_count];"
+    filter_complex_str+="[0:a:$idx]"
+    # High-quality resampling
+    filter_complex_str+="aresample=resampler=soxr:precision=28:async=1000,"
+    # Natural stereo downmix
+    filter_complex_str+="pan=stereo|FL=0.5*FC+0.707*FL+0.5*BL+0.5*LFE|FR=0.5*FC+0.707*FR+0.5*BR+0.5*LFE,"
+    # Gentle noise reduction
+    filter_complex_str+="afftdn=nr=12:nf=-45:track_noise=1,"
+    # EBU R128 normalization for wide dynamics
+    filter_complex_str+="loudnorm=I=-23:LRA=20:TP=-1.5:linear=true:dual_mono=true,"
+    # Smooth dynamic normalization
+    # filter_complex_str+="dynaudnorm=g=125:p=0.9:m=100:s=2.0,"
+    # Transparent limiting (no unsupported options)
+    filter_complex_str+="alimiter=level=disabled:limit=-0.3dB:attack=25:release=200"
+    filter_complex_str+="[a$stream_count];"
     map_audio_str+="-map [a$stream_count] "
     ((stream_count++))
 }
+
+
+
+
 
 # Detect audio streams by language preference
 # Find all English audio stream indices using actual stream indexes
@@ -214,7 +226,7 @@ input_size_mb=$(du -m "$input_video" | cut -f1)
 output_size_mb=$(du -m "$temp_output_file" | cut -f1)
 size_change_percent=$(echo "scale=2; (($input_size_mb - $output_size_mb) / $input_size_mb) * 100" | bc)
 
-log_message "Input size: ${input_size_mb}MB | Output size: ${output_size_mb}MB | Change: ${size_change_percent}%"
+log_message "!!!!! Input size: ${input_size_mb}MB | Output size: ${output_size_mb}MB | Change: ${size_change_percent}% !!!!!"
 
 if [ "$output_size_mb" -lt "$min_output_size_mb" ]; then
     log_message "Error: Output file too small (${output_size_mb}MB < ${min_output_size_mb}MB)"
