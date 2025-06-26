@@ -13,6 +13,8 @@ safe_input="file:$input_video" # Add protocol prefix
 video_name=$(basename "$input_video")
 video_name_no_ext="${video_name%.*}"
 
+declare -A audio_bitrates  # Stores target bitrates per output stream index
+
 min_output_size_mb=10
 log_file="/plexdb/plexlogs/${video_name_no_ext}_copy_encode_log.txt"
 temp_output_file="/plexdb/plexlogs/temp/${video_name_no_ext}_temp_copy.mkv"
@@ -46,6 +48,23 @@ check_subtitle_codec() {
     return 0
 }
 
+get_target_bitrate() {
+    local stream_index=$1
+    local src_bitrate=$(ffprobe -v error -select_streams a:$stream_index \
+        -show_entries stream=bit_rate -of default=noprint_wrappers=1:nokey=1 "$safe_input")
+    # Default to 128k if detection fails, is N/A, or non-numeric
+    if [[ -z "$src_bitrate" || "$src_bitrate" == "N/A" || ! "$src_bitrate" =~ ^[0-9]+$ || "$src_bitrate" -le 0 ]]; then
+        src_bitrate=128000
+    fi
+    # Cap at 128000
+    if (( src_bitrate > 128000 )); then
+        echo 128000
+    else
+        echo "$src_bitrate"
+    fi
+}
+
+
 # Stream detection with corrected parsing
 log_message "Starting stream analysis for $safe_input"
 
@@ -56,25 +75,45 @@ stream_count=0
 
 process_audio_stream() {
     local idx="$1"
+    target_bitrate=$(get_target_bitrate "$idx")
+    audio_bitrates[$stream_count]=$target_bitrate
+    
+    # Detect channel layout for this audio stream
+    local channels=$(ffprobe -v error -select_streams a:$idx \
+        -show_entries stream=channels -of default=noprint_wrappers=1:nokey=1 "$safe_input")
+    
     filter_complex_str+="[0:a:$idx]"
+    
     # High-quality resampling
     filter_complex_str+="aresample=resampler=soxr:precision=28:async=1000,"
-    # Natural stereo downmix
-    filter_complex_str+="pan=stereo|FL=0.5*FC+0.707*FL+0.5*BL+0.5*LFE|FR=0.5*FC+0.707*FR+0.5*BR+0.5*LFE,"
+    
+    # Apply stereo downmix only if not mono (more than 1 channel)
+    if [[ "$channels" -gt 2 ]]; then
+        # Natural stereo downmix for multi-channel audio
+        filter_complex_str+="pan=stereo|FL=0.5*FC+0.707*FL+0.5*BL+0.5*LFE|FR=0.5*FC+0.707*FR+0.5*BR+0.5*LFE,"
+        log_message "Audio stream $idx: $channels channels detected, applying stereo downmix"
+    else
+        log_message "Audio stream $idx: Mono audio detected, preserving mono layout"
+    fi
+    
     # Gentle noise reduction
     filter_complex_str+="afftdn=nr=12:nf=-45:track_noise=1,"
+    
     # EBU R128 normalization for wide dynamics
-    filter_complex_str+="loudnorm=I=-23:LRA=20:TP=-1.5:linear=true:dual_mono=true,"
-    # Smooth dynamic normalization
-    # filter_complex_str+="dynaudnorm=g=125:p=0.9:m=100:s=2.0,"
+    if [[ "$channels" -gt 1 ]]; then
+        filter_complex_str+="loudnorm=I=-23:LRA=20:TP=-1.5:linear=true:dual_mono=true,"
+    else
+        # Use mono-specific loudnorm settings
+        filter_complex_str+="loudnorm=I=-23:LRA=20:TP=-1.5:linear=true,"
+    fi
+    
     # Transparent limiting (no unsupported options)
     filter_complex_str+="alimiter=level=disabled:limit=-0.3dB:attack=25:release=200"
     filter_complex_str+="[a$stream_count];"
+    
     map_audio_str+="-map [a$stream_count] "
     ((stream_count++))
 }
-
-
 
 
 
@@ -83,14 +122,14 @@ process_audio_stream() {
 readarray -t eng_audio_idxs < <(
     ffprobe -v error -select_streams a \
     -show_entries stream=index:stream_tags=language \
-    -of csv=p=0 "$input_video" | awk -F',' '$2=="eng"{print NR-1}'
+    -of csv=p=0 "$safe_input" | awk -F',' '$2=="eng"{print NR-1}'
 )
 
 # Find first Japanese audio stream index using actual stream index
 jpn_audio_idx=$(
     ffprobe -v error -select_streams a \
     -show_entries stream=index:stream_tags=language \
-    -of csv=p=0 "$input_video" | awk -F',' '$2=="jpn"{print NR-1; exit}'
+    -of csv=p=0 "$safe_input" | awk -F',' '$2=="jpn"{print NR-1; exit}'
 )
 
 
@@ -121,9 +160,19 @@ subtitle_streams_found=false
 
 # Check for English subtitles first
 if ffprobe -v error -select_streams s -show_entries stream=index:stream_tags=language \
--of csv=p=0 "$safe_input" | grep -q ',eng'; then
+-of csv=p=0 "$safe_input" | grep -qE ',eng$'; then
     map_opts+=" -map 0:s:m:language:eng"
-    log_message "English subtitles detected and will be mapped."
+    log_message "English subtitles (ISO code) detected and will be mapped."
+    subtitle_streams_found=true
+fi
+
+for idx in $(ffprobe -v error -select_streams s -show_entries stream=index:stream_tags=language \
+    -of csv=p=0 "$safe_input" | awk -F',' '$2=="english"{print $1}'); do
+    map_opts+=" -map 0:$idx"
+    log_message "English subtitle stream (english) at index $idx will be mapped."
+        found_english_index=true
+done
+if [ "$found_english_index" = true ]; then
     subtitle_streams_found=true
 fi
 
@@ -187,7 +236,19 @@ $map_opts \
 if [ -n "$filter_complex_str" ]; then
     ffmpeg_command+=" -filter_complex \"$filter_complex_str\""
 fi
-ffmpeg_command+=" -c:a libopus -b:a 128k -vbr on -application audio"
+
+ffmpeg_audio_opts=""
+for idx in "${!audio_bitrates[@]}"; do
+    # Ensure value is numeric before conversion
+    bitrate_val="${audio_bitrates[$idx]}"
+    # If already has 'k', strip it for safety
+    bitrate_val="${bitrate_val%k}"
+    # Convert to kilobits and append 'k'
+    bitrate_k="$(( bitrate_val / 1000 ))k"
+    ffmpeg_audio_opts+=" -b:a:$idx $bitrate_k"
+done
+
+ffmpeg_command+=" -c:a libopus $ffmpeg_audio_opts -vbr on -application audio"
 
 # Subtitle handling
 if ! check_subtitle_codec; then
