@@ -50,6 +50,14 @@ if [ ! -f "$input_video" ]; then
     exit 1
 fi
 
+# Detect if the input file is AVI
+file_extension="${input_video##*.}"
+is_avi=false
+if [[ "${file_extension,,}" == "avi" ]]; then
+    is_avi=true
+    log_message "AVI file detected. Will use compatible encoding parameters."
+fi
+
 # Function to check subtitle codec
 check_subtitle_codec() {
     local subtitle_info=$(ffprobe -v error -select_streams s -show_entries stream=codec_name,codec_tag_string -of csv=p=0 "$safe_input")
@@ -134,11 +142,11 @@ readarray -t eng_audio_idxs < <(
     -of csv=p=0 "$safe_input" | awk -F',' '$2=="eng"{print NR-1}'
 )
 
-# Find first Japanese audio stream index using actual stream index
-jpn_audio_idx=$(
-    ffprobe -v error -select_streams a \
+readarray -t jpn_audio_idxs < <(
+  ffprobe -v error -select_streams a \
     -show_entries stream=index:stream_tags=language \
-    -of csv=p=0 "$safe_input" | awk -F',' '$2=="jpn"{print NR-1; exit}'
+    -of csv=p=0 "$safe_input" \
+  | awk -F',' '$2=="jpn"{print NR-1}'
 )
 
 # Process all English streams first
@@ -241,13 +249,23 @@ else
     log_message "Progressive content detected. Skipping deinterlacing."
 fi
 
-# Build FFmpeg command
-ffmpeg_command="ffmpeg -thread_queue_size 1024 \
-    -analyzeduration 300M -probesize 300M\
+# FFmpeg command construction
+# Construct the ffmpeg command with conditional parameters
+if [ "$is_avi" = true ]; then
+    # AVI-compatible command (remove -async and -extra_hw_frames)
+    ffmpeg_command="ffmpeg -thread_queue_size 1024 \
+    -analyzeduration 300M -probesize 300M \
+    -fflags +genpts \
+    -hwaccel qsv -hwaccel_output_format qsv \
+    -i \"$safe_input\""
+else
+    ffmpeg_command="ffmpeg -thread_queue_size 1024 \
+    -analyzeduration 300M -probesize 300M \
     -fflags +genpts \
     -hwaccel qsv -hwaccel_output_format qsv \
     -extra_hw_frames 88 -async_depth 16 \
     -i \"$safe_input\""
+fi
 
 # Add deinterlacing filter if needed
 if [ -n "$deinterlace_filter" ]; then
