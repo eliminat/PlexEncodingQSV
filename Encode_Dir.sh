@@ -2,14 +2,30 @@
 
 # Default extension
 EXT="mkv"
+ENCODER="~/scripts/Encode.sh"
+CODEC="AV1"
 
-# Check if an argument is provided
-if [ $# -eq 1 ]; then
-    EXT=$(echo "$1" | tr '[:upper:]' '[:lower:]')
-fi
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --hevc)
+            ENCODER="~/scripts/Encode_HEVC.sh"
+            CODEC="HEVC"
+            shift
+            ;;
+        --audio-only)
+            ENCODER="~/scripts/Audio_Only.sh"
+            CODEC="Audio"
+            shift
+            ;;
+        *)
+            EXT=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+            shift
+            ;;
+    esac
+done
 
-# Find and encode all files with the specified extension (case-insensitive for both extension and filename)
-find . -type f -iregex ".*\.$EXT" -exec /home/eliminat/scripts/Encode.sh {} \;
+# Find and encode all files with the specified extension (case-insensitive)
+find . -type f -iregex ".*\\.$EXT" -exec "$ENCODER" {} \;
 
-echo "Encoding complete for all *.$EXT files (case-insensitive) in the current directory and subdirectories."
-
+echo "Encoding complete for all *.$EXT files (case-insensitive) in the current directory and subdirectories using $CODEC."
