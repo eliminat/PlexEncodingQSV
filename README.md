@@ -19,7 +19,16 @@ A single, modular script that replaces the legacy `Encode.sh`, `Encode_HEVC.sh`,
 *   **HDR10 Preservation:** Active probing and mapping of Color Primaries, Transfer Characteristics, and Colorspace to ensure HDR flags are preserved for 4K content.
 *   **Safety & Security:** Built using **Bash Arrays** and JSON parsing (`jq`). Immune to filename escaping issues (spaces, brackets, colons) and field-shifting bugs.
 
-### 2. **Encode_Dir.sh** (The Batch Wrapper)
+### 2. **Library_Scanner.sh** (The Intelligence Sentinel)
+A high-performance library analyzer that replaces the legacy `ident_avc.sh` and `List-non1080p.sh`.
+
+*   **HDD Optimized:** Uses parallel probing (`PARALLEL_JOBS`) to handle the latency of spinning disks.
+*   **Resolution Tiering:** Categorizes files into **4K, 2K, 1080p, 720p, SD**, and **NON_STD** (incompatible extensions).
+*   **Quality Protection:** Calculates Bitrate-per-Pixel (BPP). If a file is already below the `0.02` threshold, it is tagged as `LOW_QUALITY` to prevent generational loss during re-encoding.
+*   **Granular Filtering:** Use `--only-res` to find specifically SD files, or only 4K files, etc.
+*   **Extension Detection:** Identifies legacy formats (`.avi`, `.wmv`, `.mov`, `.flv`) and recommends re-encoding to modern `.mkv` containers.
+
+### 3. **Encode_Dir.sh** (The Batch Wrapper)
 A recursive batch processor that handles entire library structures.
 *   **Dynamic Flags:** Pass any flag (like `--hevc` or `--copy-video`) directly through to the underlying encoder.
 *   **Safe Traversal:** Uses `-print0` to safely handle complex filenames during directory scanning.
@@ -28,27 +37,27 @@ A recursive batch processor that handles entire library structures.
 
 ## 🛠 Usage
 
-### **Universal_Encode.sh**
-Process a single file with specific requirements:
+### **Scanning and Analysis**
+Generate reports or recommendation lists for your library:
 
-*   **Default (AV1 Encoding):**
+*   **Full Report:**
+    `./Library_Scanner.sh /path/to/library --report`
+*   **Filter by Resolution (e.g., find only SD files):**
+    `./Library_Scanner.sh /path/to/library --report --only-res SD`
+*   **Find Incompatible Formats (.avi, .wmv, etc.):**
+    `./Library_Scanner.sh /path/to/library --report --only-res NON_STD`
+*   **Generate Re-encode Hit-list:**
+    `./Library_Scanner.sh /path/to/library --recommend --output tasks.txt`
+
+### **Encoding**
+Process single files or batches:
+
+*   **Process Hit-list (Automated):**
+    `./Library_Scanner.sh . --auto --input tasks.txt`
+*   **Single File AV1 (Default):**
     `./Universal_Encode.sh /path/to/video.mkv`
-*   **HEVC Encoding:**
-    `./Universal_Encode.sh --hevc /path/to/video.mkv`
-*   **Remux & Process Audio Only:**
-    `./Universal_Encode.sh --copy-video /path/to/video.mkv`
-*   **Custom Quality (CRF/Global Quality):**
-    `./Universal_Encode.sh --quality 28 /path/to/video.mkv`
-
-### **Encode_Dir.sh**
-Process a whole directory tree:
-
-*   **Batch AV1 (Default):**
-    `./Encode_Dir.sh mkv`
-*   **Batch HEVC:**
+*   **Batch HEVC Encode:**
     `./Encode_Dir.sh --hevc mkv`
-*   **Batch Remux (Video Copy):**
-    `./Encode_Dir.sh --copy-video mp4`
 
 ---
 
@@ -63,19 +72,7 @@ Process a whole directory tree:
 | `-tile_cols 2` | Specifically for Arc AV1 encoders to use dual-tile hardware. |
 | `-g (FPS*10)` | Dynamic GOP size for optimal seek performance. |
 
-### **Audio Pipeline (Opus)**
-*   **Target:** Transparent 128kbps stereo Opus.
-*   **Downmix:** Natural stereo downmix preserving LFE and Center channel balance.
-*   **Normalization:** EBU R128 standard (-23 Integrated, -1.5 True Peak).
-
 ---
-
-## 📂 Repository Structure
-*   `Universal_Encode.sh`: The core unified encoding script.
-*   `Encode_Dir.sh`: The recursive batch wrapper.
-*   `encoding_migration_plan.md`: Technical documentation of the transition from legacy scripts.
-*   `ident_avc.sh`: Utility to find H.264 files needing upgrade.
-*   `List-non1080p.sh`: Utility to find sub-1080p content.
 
 ## 📝 Requirements
 *   **Hardware:** Intel CPU/GPU with QSV support (Discrete Arc A-Series recommended).
