@@ -5,7 +5,7 @@
 # ==============================================================================
 
 # --- Configuration & Defaults ---
-ENCODER="/home/eliminat/scripts/Universal_Encode.sh"
+ENCODER="/home/eliminat/scripts/Encode.sh"
 MIN_BPP_THRESHOLD="0.02"
 SCAN_DIR="."
 MODE="report"

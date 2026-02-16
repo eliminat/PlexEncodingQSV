@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# Encode_Dir.sh - Batch wrapper for Universal_Encode.sh
+# Encode_Dir.sh - Batch wrapper for Encode.sh
 # ==============================================================================
 
 # Default settings
@@ -36,7 +36,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-ENCODER="/home/eliminat/scripts/Universal_Encode.sh"
+ENCODER="/home/eliminat/scripts/Encode.sh"
 
 # Find and encode all files with the specified extension (case-insensitive)
 # Using -print0 and read -d '' for absolute filename safety

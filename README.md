@@ -4,7 +4,7 @@ This repository contains a unified, high-performance encoding system designed sp
 
 ## 🚀 Key Features of the Universal Pipeline
 
-### 1. **Universal_Encode.sh** (The Swiss Army Knife)
+### 1. **Encode.sh** (The Swiss Army Knife)
 A single, modular script that replaces the legacy `Encode.sh`, `Encode_HEVC.sh`, and `Audio_Only.sh`.
 
 *   **Unified Codec Support:** Switch between AV1, HEVC, or Remux (Copy-Video) modes with simple flags.
@@ -55,7 +55,7 @@ Process single files or batches:
 *   **Process Hit-list (Automated):**
     `./Library_Scanner.sh . --auto --input tasks.txt`
 *   **Single File AV1 (Default):**
-    `./Universal_Encode.sh /path/to/video.mkv`
+    `./Encode.sh /path/to/video.mkv`
 *   **Batch HEVC Encode:**
     `./Encode_Dir.sh --hevc mkv`
 

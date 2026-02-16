@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# Universal_Encode.sh - Unified Intel Arc A380 QSV Encoding Pipeline
+# Encode.sh - Unified Intel Arc A380 QSV Encoding Pipeline
 # Supports: AV1, HEVC, and Remux (Copy-Video) modes
 # ==============================================================================
 
