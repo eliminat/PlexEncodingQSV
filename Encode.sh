@@ -162,7 +162,7 @@ else
     fi
 
     log_message "Analyzing color saturation at ${SEEK_POINT}s to detect B&W content..."
-    SATAVG=$(ffmpeg -ss "$SEEK_POINT" -t 2 -i "$INPUT_VIDEO" -vf signalstats,metadata=print:key=lavfi.signalstats.SATAVG -f null - 2>&1 | \
+    SATAVG=$(ffmpeg -nostdin -ss "$SEEK_POINT" -t 2 -i "$INPUT_VIDEO" -vf signalstats,metadata=print:key=lavfi.signalstats.SATAVG -f null - 2>&1 | \
              grep "lavfi.signalstats.SATAVG" | cut -d'=' -f2 | \
              awk '{sum+=$1; count++} END {if (count > 0) print sum/count; else print -1}')
 
@@ -225,7 +225,7 @@ ST_COUNT=0
 
 # Probe stream directories for all audio and subtitle components.
 A_JSON=$(ffprobe -v error -select_streams a -show_entries stream=index:stream_tags=language:stream=channels:stream=bit_rate -of json "$INPUT_VIDEO")
-S_JSON=$(ffprobe -v error -select_streams s -show_entries stream=index:stream_tags=language -of json "$INPUT_VIDEO")
+S_JSON=$(ffprobe -v error -select_streams s -show_entries stream=index,codec_name:stream_tags=language -of json "$INPUT_VIDEO")
 
 # Helper function to extract stream indices matching a target language tag.
 get_audio_indices() {
@@ -281,10 +281,21 @@ for IDX in $ALL_A_STREAMS; do
 done
 
 # Subtitle Mapping (User Constraint: English-only subtitle streams preserved).
+# Dynamic Transcoding: Convert incompatible 'mov_text' to 'srt' for Matroska compatibility.
 SUB_MAPS=()
-ENG_S_STREAMS=$(echo "$S_JSON" | jq -r '.streams[] | select(.tags.language != null and (.tags.language | test("eng"; "i"))) | .index')
-for IDX in $ENG_S_STREAMS; do
+SUB_OPTS=()
+ENG_S_DATA=$(echo "$S_JSON" | jq -r '.streams[] | select(.tags.language != null and (.tags.language | test("eng"; "i"))) | "\(.index):\(.codec_name)"' 2>/dev/null)
+SUB_COUNT=0
+for ENTRY in $ENG_S_DATA; do
+    IDX=${ENTRY%%:*}
+    CODEC=${ENTRY#*:}
     SUB_MAPS+=("-map" "0:$IDX")
+    if [[ "$CODEC" == "mov_text" ]]; then
+        SUB_OPTS+=("-c:s:$SUB_COUNT" "srt")
+    else
+        SUB_OPTS+=("-c:s:$SUB_COUNT" "copy")
+    fi
+    ((SUB_COUNT++))
 done
 
 # --- Resolution-Based Tiling Optimization Fork ---
@@ -370,7 +381,12 @@ CMD+=("-map" "0:v:0" "${AUDIO_MAPS[@]}" "${SUB_MAPS[@]}" "-map_chapters" "0" "-m
 
 [ -n "$FILTER_COMPLEX" ] && CMD+=("-filter_complex" "${FILTER_COMPLEX%;}")
 CMD+=("-c:a" "libopus" "${AUDIO_OPTS[@]}" "-vbr" "on" "-application" "audio")
-CMD+=("-c:s" "copy" "-max_muxing_queue_size" "8192")
+if [ "$ENCODER_TYPE" != "copy" ]; then
+    CMD+=("${SUB_OPTS[@]}")
+else
+    CMD+=("-c:s" "copy")
+fi
+CMD+=("-max_muxing_queue_size" "8192")
 CMD+=("-movflags" "+faststart" "-fps_mode" "cfr" "file:$TEMP_OUTPUT")
 
 # --- Execution Phase ---
