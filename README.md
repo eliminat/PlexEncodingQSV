@@ -17,6 +17,7 @@ A single, modular script that replaces the legacy `Encode.sh`, `Encode_HEVC.sh`,
     *   **Metadata Preservation:** Correctly labels resulting Opus tracks with their source language tags.
     *   **Audio Pipeline:** High-quality SOXR resampling, FFT denoising, EBU R128 normalization (`-23 LUFS`), and peak limiting.
 *   **HDR10 Preservation:** Active probing and mapping of Color Primaries, Transfer Characteristics, and Colorspace to ensure HDR flags are preserved for 4K content.
+*   **Subtitle Compatibility:** Preserves English subtitles, automatically transcoding incompatible MP4 `mov_text` subtitle streams to SubRip (`srt`) for Matroska container compatibility.
 *   **Safety & Security:** Built using **Bash Arrays** and JSON parsing (`jq`). Immune to filename escaping issues (spaces, brackets, colons) and field-shifting bugs.
 
 ### 2. **Library_Scanner.sh** (The Intelligence Sentinel)
@@ -30,8 +31,10 @@ A high-performance library analyzer that replaces the legacy `ident_avc.sh` and 
 
 ### 3. **Encode_Dir.sh** (The Batch Wrapper)
 A recursive batch processor that handles entire library structures.
+*   **Target Folder & Sub-folder Scanning:** Accepts explicit `--dir <path>` or positional folder arguments, recursively scanning all subdirectories with fail-fast path validation.
+*   **Multi-Extension Support:** Supports comma-separated extensions (e.g., `mkv,avi`) using POSIX extended regex alternation.
+*   **Signal Interruption Handling (Ctrl+C):** Traps SIGINT/SIGTERM and uses process substitution (`< <(find ...)`) to ensure clean, immediate batch termination when Ctrl+C is pressed.
 *   **Dynamic Flags:** Pass any flag (like `--hevc` or `--copy-video`) directly through to the underlying encoder.
-*   **Safe Traversal:** Uses `-print0` to safely handle complex filenames during directory scanning.
 
 ---
 
@@ -56,8 +59,8 @@ Process single files or batches:
     `./Library_Scanner.sh . --auto --input tasks.txt`
 *   **Single File AV1 (Default):**
     `./Encode.sh /path/to/video.mkv`
-*   **Batch HEVC Encode:**
-    `./Encode_Dir.sh --hevc mkv`
+*   **Batch HEVC Encode with Target Directory & Multi-Extension:**
+    `./Encode_Dir.sh --dir /path/to/folder --hevc mkv,avi`
 
 ---
 
