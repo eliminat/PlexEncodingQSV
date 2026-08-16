@@ -248,6 +248,15 @@ ALL_A_STREAMS=$(printf "%s\n%s\n%s" "$ENG_A_STREAMS" "$JPN_A_STREAMS" "$UND_A_ST
 # Pass 1: Measures integrated loudness, true peak, LRA, threshold, and offset via loudnorm JSON.
 # Pass 2: Applies exact linear gain scaling using pre-measured values (linear=true).
 FILTER_COMPLEX=""
+
+PROBE_PIDS=()
+PROBE_TMP_FILES=()
+A_IDX_ARRAY=()
+A_LANG_ARRAY=()
+A_BITRATE_ARRAY=()
+A_PRECHAIN_ARRAY=()
+
+# 1. Prepare configuration and launch Pass 1 probes in parallel
 for IDX in $ALL_A_STREAMS; do
     CHANNELS=$(echo "$A_JSON" | jq -r ".streams[] | select(.index == $IDX) | .channels")
     LANG=$(echo "$A_JSON" | jq -r ".streams[] | select(.index == $IDX) | .tags.language // \"und\"")
@@ -265,24 +274,56 @@ for IDX in $ALL_A_STREAMS; do
     [ "$CHANNELS" -gt 2 ] && PRE_CHAIN+=",pan=stereo|FL=0.5*FC+0.707*FL+0.5*BL+0.5*LFE|FR=0.5*FC+0.707*FR+0.5*BR+0.5*LFE"
     PRE_CHAIN+=",afftdn=nr=12:nf=-45"
 
-    # --- Pass 1: Loudness Measurement Probe (audio-only, no GPU, no disk output) ---
-    log_message "Measuring audio loudness (Pass 1) for stream $IDX ($LANG)..."
-    RAW_PROBE=$(ffmpeg -hide_banner -nostdin -i "file:$INPUT_VIDEO" \
-        -filter_complex "[0:$IDX]${PRE_CHAIN},loudnorm=I=-23:LRA=20:TP=-1.5:print_format=json[a]" \
-        -map "[a]" -vn -sn -dn -f null - 2>&1)
-    PROBE_EXIT=$?
+    A_IDX_ARRAY+=("$IDX")
+    A_LANG_ARRAY+=("$LANG")
+    A_BITRATE_ARRAY+=("$T_BITRATE_K")
+    A_PRECHAIN_ARRAY+=("$PRE_CHAIN")
 
-    if [[ $PROBE_EXIT -ne 0 ]]; then
-        log_message "Error: Audio probe (Pass 1) failed on stream $IDX (Exit Code: $PROBE_EXIT). Aborting."
-        exit 1
+    TMP_JSON=$(mktemp /tmp/loudnorm_probe_XXXXXX.log)
+    PROBE_TMP_FILES+=("$TMP_JSON")
+
+    log_message "Measuring audio loudness (Pass 1) for stream $IDX ($LANG) in background..."
+    (
+        ffmpeg -hide_banner -nostdin -i "file:$INPUT_VIDEO" \
+            -filter_complex "[0:$IDX]${PRE_CHAIN},loudnorm=I=-23:LRA=20:TP=-1.5:print_format=json[a]" \
+            -map "[a]" -vn -sn -dn -f null - > "$TMP_JSON" 2>&1
+    ) &
+    PROBE_PIDS+=($!)
+done
+
+# 2. Wait for all probes and enforce Strict Archival Hard-Fail Policy
+FAILED=0
+for i in "${!PROBE_PIDS[@]}"; do
+    PID="${PROBE_PIDS[$i]}"
+    wait "$PID"
+    STATUS=$?
+    if [[ $STATUS -ne 0 ]]; then
+        log_message "Error: Audio probe failed on PID $PID (Stream index ${A_IDX_ARRAY[$i]}, Exit Code: $STATUS). Aborting."
+        FAILED=1
     fi
+done
 
-    # Extract the trailing JSON measurement block from ffmpeg stderr output.
-    LOUDNORM_JSON=$(echo "$RAW_PROBE" | sed -n '/^{$/,/^}$/p' | tail -n 12)
+if [[ $FAILED -ne 0 ]]; then
+    # Clean up temp files before aborting
+    rm -f "${PROBE_TMP_FILES[@]}"
+    log_message "Aborting transcode due to audio probe failure."
+    exit 1
+fi
 
-    # Strict JSON validation guard: catch malformed or shifted output immediately.
+# 3. Parse JSONs and assemble Pass 2 Filtergraph sequentially
+for i in "${!A_IDX_ARRAY[@]}"; do
+    IDX="${A_IDX_ARRAY[$i]}"
+    LANG="${A_LANG_ARRAY[$i]}"
+    T_BITRATE_K="${A_BITRATE_ARRAY[$i]}"
+    PRE_CHAIN="${A_PRECHAIN_ARRAY[$i]}"
+    TMP_JSON="${PROBE_TMP_FILES[$i]}"
+    
+    LOUDNORM_JSON=$(sed -n '/^{$/,/^}$/p' "$TMP_JSON" | tail -n 12)
+    rm -f "$TMP_JSON"
+
     if ! echo "$LOUDNORM_JSON" | jq -e . >/dev/null 2>&1; then
         log_message "Error: Failed to parse valid loudnorm JSON from stream $IDX probe. Aborting."
+        rm -f "${PROBE_TMP_FILES[@]}"
         exit 1
     fi
 
@@ -293,22 +334,15 @@ for IDX in $ALL_A_STREAMS; do
     OFFSET=$(echo "$LOUDNORM_JSON" | jq -r '.target_offset // empty')
 
     # --- Pass 2 Filter Chain Decision ---
-    # Silence Protection: If stream is pure silence (-inf), bypass loudnorm to prevent
-    # AGC noise floor amplification. Route directly through the peak limiter.
     if [[ "$M_I" == "-inf" || "$M_I" == "inf" || -z "$M_I" ]]; then
         log_message "Notice: Stream $IDX measured as silent or non-finite (input_i: ${M_I:-empty}). Bypassing loudnorm."
         CHAIN="[0:$IDX]${PRE_CHAIN},alimiter=limit=0.8414:level=0"
     else
-        # Finite Linear Normalization: Feed all 5 pre-measured values into loudnorm with linear=true.
-        # This applies a single, exact mathematical gain offset across the entire stream,
-        # preserving 100% of the original dynamic range without AGC pumping.
-        #   alimiter: Peak limiter hard cap at -1.5 dBTP (linear value 0.8414 = 10^(-1.5/20)).
-        #   level=0: Disables auto-leveling to prevent boosting quieter sections.
-        log_message "Pass 1 Measured: I=${M_I} LUFS, TP=${M_TP} dBTP, LRA=${M_LRA} LU, Thresh=${M_THRESH} LUFS, Offset=${OFFSET} LU"
+        log_message "Pass 1 Measured (Stream $IDX): I=${M_I} LUFS, TP=${M_TP} dBTP, LRA=${M_LRA} LU, Thresh=${M_THRESH} LUFS, Offset=${OFFSET} LU"
         CHAIN="[0:$IDX]${PRE_CHAIN},loudnorm=I=-23:LRA=20:TP=-1.5:measured_I=${M_I}:measured_TP=${M_TP}:measured_LRA=${M_LRA}:measured_thresh=${M_THRESH}:offset=${OFFSET}:linear=true,alimiter=limit=0.8414:level=0"
     fi
 
-    # Assign unique filter label and append to filtergraph with clean delimiter (no trailing semicolons).
+    # Assign unique filter label and append to filtergraph with clean delimiter
     F_NAME="[a$ST_COUNT]"
     [ -n "$FILTER_COMPLEX" ] && FILTER_COMPLEX+=";"
     FILTER_COMPLEX+="$CHAIN$F_NAME"
