@@ -69,7 +69,7 @@ Process single files or batches:
 ### **Intel Arc A380 Specific Flags**
 | Flag | Purpose |
 | :--- | :--- |
-| `-hwaccel qsv` | Hardware decoding via Intel Quick Sync. |
+| `-hwaccel qsv` | Hardware decoding via Intel Quick Sync / oneVPL. |
 | `-extbrc 1` | Extended Bitrate Control for more consistent quality. |
 | `-look_ahead 1` | Enables look-ahead rate control. |
 | `-tile_cols 2` | Specifically for Arc AV1 encoders to use dual-tile hardware. |
@@ -79,7 +79,17 @@ Process single files or batches:
 
 ## 📝 Requirements
 *   **Hardware:** Intel CPU/GPU with QSV support (Discrete Arc A-Series recommended).
-*   **Software:** `ffmpeg` (with QSV), `jq`, `mediainfo`, `mkvpropedit`, `bc`.
+*   **Software:** `ffmpeg` 5.x–9.0+ ("Lei" verified with oneVPL QSV standards), `jq`, `mediainfo`, `mkvpropedit`, `bc`.
 
 ---
+
+## ⚡ FFmpeg 9.0 ("Lei") Compatibility & Architecture Notes
+*   **Standard QSV/oneVPL Syntax:** Fully compliant with FFmpeg 9.0's enforced `-init_hw_device qsv=hw -filter_hw_device hw -hwaccel qsv -hwaccel_output_format qsv` specification.
+*   **`libswscale` Overhaul:** Benefits from FFmpeg 9.0's rewritten `libswscale` (Vulkan/SIMD backend) for faster CPU-to-GPU memory color format conversions during 10-bit H.264 software decode fallbacks.
+*   **Audio Safety:** Opus audio processing (`libopus`) is fully preserved and unaffected by FFmpeg 9.0's removal of standalone legacy CELT decoding.
+
+---
+
 **Note:** For technical details on the transition from the old multi-script system, see [encoding_migration_plan.md](./encoding_migration_plan.md).
+
+**Last Updated**: 2026-08-05

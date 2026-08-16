@@ -243,7 +243,10 @@ ALL_A_STREAMS=$(printf "%s\n%s\n%s" "$ENG_A_STREAMS" "$JPN_A_STREAMS" "$UND_A_ST
 # Fallback: if no priority matches are found, process all available audio streams.
 [ -z "$ALL_A_STREAMS" ] && ALL_A_STREAMS=$(echo "$A_JSON" | jq -r '.streams[].index')
 
-# --- Audio Filtergraph Construction ---
+# --- Audio Filtergraph Construction (2-Pass Linear Loudness Engine) ---
+# Implements EBU R128 (-23 LUFS / -1.5 dBTP) with full dynamic range preservation.
+# Pass 1: Measures integrated loudness, true peak, LRA, threshold, and offset via loudnorm JSON.
+# Pass 2: Applies exact linear gain scaling using pre-measured values (linear=true).
 FILTER_COMPLEX=""
 for IDX in $ALL_A_STREAMS; do
     CHANNELS=$(echo "$A_JSON" | jq -r ".streams[] | select(.index == $IDX) | .channels")
@@ -257,26 +260,60 @@ for IDX in $ALL_A_STREAMS; do
     T_BITRATE=$(( SRC_BITRATE > 128000 ? 128000 : SRC_BITRATE ))
     T_BITRATE_K="$(( T_BITRATE / 1000 ))k"
 
-    F_NAME="[a$ST_COUNT]"
-    
-    # Resample audio using high-precision 'soxr' resampler with a 1000ms synchronization window.
-    CHAIN="[0:$IDX]aresample=resampler=soxr:precision=28:async=1000"
-    
-    # User Constraint: Downmix all multichannel audio (5.1/7.1/TrueHD) to stereo using standard panning gains.
-    [ "$CHANNELS" -gt 2 ] && CHAIN+=",pan=stereo|FL=0.5*FC+0.707*FL+0.5*BL+0.5*LFE|FR=0.5*FC+0.707*FR+0.5*BR+0.5*LFE"
-    
-    # Audio Enhancement Chain:
-    #   1. afftdn: Gentle noise reduction (noise reduction 12dB, noise floor -45dB) to remove background hum.
-    #   2. loudnorm: Single-pass loudness normalization targeting EBU R128 (-23 LUFS, true peak limit -1.5dBFS).
-    #      * Note: Removed ':linear=true' because dual-pass parameters are not available; dynamic mode is used.
-    #   3. alimiter: Peak limiter hard cap at -0.3dBFS (linear value 0.9661).
-    #      * Note: Specified linear limit value to avoid syntax errors and set 'level=disabled' to prevent
-    #        auto-leveling from boosting quieter sections and overriding the loudnorm target.
-    CHAIN+=",afftdn=nr=12:nf=-45,loudnorm=I=-23:LRA=20:TP=-1.5,alimiter=limit=0.9661:level=disabled"
+    # Build pre-normalization filter chain: soxr resampler + optional stereo downmix + afftdn denoiser.
+    PRE_CHAIN="aresample=resampler=soxr:precision=28:async=1000"
+    [ "$CHANNELS" -gt 2 ] && PRE_CHAIN+=",pan=stereo|FL=0.5*FC+0.707*FL+0.5*BL+0.5*LFE|FR=0.5*FC+0.707*FR+0.5*BR+0.5*LFE"
+    PRE_CHAIN+=",afftdn=nr=12:nf=-45"
 
-    FILTER_COMPLEX+="$CHAIN$F_NAME;"
+    # --- Pass 1: Loudness Measurement Probe (audio-only, no GPU, no disk output) ---
+    log_message "Measuring audio loudness (Pass 1) for stream $IDX ($LANG)..."
+    RAW_PROBE=$(ffmpeg -hide_banner -nostdin -i "file:$INPUT_VIDEO" \
+        -filter_complex "[0:$IDX]${PRE_CHAIN},loudnorm=I=-23:LRA=20:TP=-1.5:print_format=json[a]" \
+        -map "[a]" -vn -sn -dn -f null - 2>&1)
+    PROBE_EXIT=$?
+
+    if [[ $PROBE_EXIT -ne 0 ]]; then
+        log_message "Error: Audio probe (Pass 1) failed on stream $IDX (Exit Code: $PROBE_EXIT). Aborting."
+        exit 1
+    fi
+
+    # Extract the trailing JSON measurement block from ffmpeg stderr output.
+    LOUDNORM_JSON=$(echo "$RAW_PROBE" | sed -n '/^{$/,/^}$/p' | tail -n 12)
+
+    # Strict JSON validation guard: catch malformed or shifted output immediately.
+    if ! echo "$LOUDNORM_JSON" | jq -e . >/dev/null 2>&1; then
+        log_message "Error: Failed to parse valid loudnorm JSON from stream $IDX probe. Aborting."
+        exit 1
+    fi
+
+    M_I=$(echo "$LOUDNORM_JSON" | jq -r '.input_i // empty')
+    M_TP=$(echo "$LOUDNORM_JSON" | jq -r '.input_tp // empty')
+    M_LRA=$(echo "$LOUDNORM_JSON" | jq -r '.input_lra // empty')
+    M_THRESH=$(echo "$LOUDNORM_JSON" | jq -r '.input_thresh // empty')
+    OFFSET=$(echo "$LOUDNORM_JSON" | jq -r '.target_offset // empty')
+
+    # --- Pass 2 Filter Chain Decision ---
+    # Silence Protection: If stream is pure silence (-inf), bypass loudnorm to prevent
+    # AGC noise floor amplification. Route directly through the peak limiter.
+    if [[ "$M_I" == "-inf" || "$M_I" == "inf" || -z "$M_I" ]]; then
+        log_message "Notice: Stream $IDX measured as silent or non-finite (input_i: ${M_I:-empty}). Bypassing loudnorm."
+        CHAIN="[0:$IDX]${PRE_CHAIN},alimiter=limit=0.8414:level=0"
+    else
+        # Finite Linear Normalization: Feed all 5 pre-measured values into loudnorm with linear=true.
+        # This applies a single, exact mathematical gain offset across the entire stream,
+        # preserving 100% of the original dynamic range without AGC pumping.
+        #   alimiter: Peak limiter hard cap at -1.5 dBTP (linear value 0.8414 = 10^(-1.5/20)).
+        #   level=0: Disables auto-leveling to prevent boosting quieter sections.
+        log_message "Pass 1 Measured: I=${M_I} LUFS, TP=${M_TP} dBTP, LRA=${M_LRA} LU, Thresh=${M_THRESH} LUFS, Offset=${OFFSET} LU"
+        CHAIN="[0:$IDX]${PRE_CHAIN},loudnorm=I=-23:LRA=20:TP=-1.5:measured_I=${M_I}:measured_TP=${M_TP}:measured_LRA=${M_LRA}:measured_thresh=${M_THRESH}:offset=${OFFSET}:linear=true,alimiter=limit=0.8414:level=0"
+    fi
+
+    # Assign unique filter label and append to filtergraph with clean delimiter (no trailing semicolons).
+    F_NAME="[a$ST_COUNT]"
+    [ -n "$FILTER_COMPLEX" ] && FILTER_COMPLEX+=";"
+    FILTER_COMPLEX+="$CHAIN$F_NAME"
     AUDIO_MAPS+=("-map" "$F_NAME")
-    AUDIO_OPTS+=("-b:a:$ST_COUNT" "$T_BITRATE_K" "-metadata:s:a:$ST_COUNT" "language=$LANG")
+    AUDIO_OPTS+=("-b:a:$ST_COUNT" "$T_BITRATE_K" "-ar:a:$ST_COUNT" "48000" "-metadata:s:a:$ST_COUNT" "language=$LANG")
     ((ST_COUNT++))
 done
 
@@ -387,7 +424,10 @@ else
     CMD+=("-c:s" "copy")
 fi
 CMD+=("-max_muxing_queue_size" "8192")
-CMD+=("-movflags" "+faststart" "-fps_mode" "cfr" "file:$TEMP_OUTPUT")
+if [[ "$TEMP_OUTPUT" == *.mp4 || "$TEMP_OUTPUT" == *.mov ]]; then
+    CMD+=("-movflags" "+faststart")
+fi
+CMD+=("-fps_mode" "cfr" "file:$TEMP_OUTPUT")
 
 # --- Execution Phase ---
 log_message "Executing: ${CMD[*]}"

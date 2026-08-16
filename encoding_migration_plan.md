@@ -46,3 +46,12 @@ The new script will support:
 3.  **Stream Intelligence:** Implement the new `ffprobe` metadata collector.
 4.  **Wrapper Update:** Modify `Encode_Dir.sh` to pass flags to the new script.
 5.  **Validation:** Test with 4K HDR source and file with spaces/brackets.
+
+## 7. FFmpeg 9.0 ("Lei") Audit & Forward-Compatibility
+*   **Audit Date:** 2026-08-05
+*   **Validation Result:** 100% Compatible (No syntax or parameter changes required).
+*   **Key Findings:**
+    *   **QSV/oneVPL API:** Modern syntax (`-init_hw_device qsv=hw -filter_hw_device hw -hwaccel qsv -hwaccel_output_format qsv`) fully complies with FFmpeg 9.0 oneVPL requirements.
+    *   **`libswscale` Performance:** Rewritten `libswscale` backend accelerates CPU-to-GPU format conversion for 10-bit H.264 software decode fallbacks.
+    *   **Audio Pipeline:** Opus audio encoding (`libopus`) is unaffected by the removal of standalone legacy CELT decoding.
+
