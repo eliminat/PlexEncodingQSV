@@ -438,8 +438,13 @@ else
     CMD+=("-look_ahead_depth:v" "80" "-extbrc:v" "1")
     CMD+=("-g:v" "$GOP_SIZE" "-bf:v" "7" "-refs:v" "5" "-low_power:v" "0")
     
-    # AV1-specific configurations: Resolution-adaptive tiling and adaptive frame sizing.
-    [ "$ENCODER_TYPE" = "av1" ] && CMD+=("${TILE_OPTS[@]}" "-adaptive_i:v" "1" "-adaptive_b:v" "1")
+    # AV1-specific configurations: Resolution-adaptive tiling for client multi-threaded software decode.
+    [ "$ENCODER_TYPE" = "av1" ] && CMD+=("${TILE_OPTS[@]}")
+
+    # Adaptive I/B Framing: Hardware scene-cut detection and dynamic B-frame hierarchy (AV1 and HEVC).
+    if [[ "$ENCODER_TYPE" == "av1" || "$ENCODER_TYPE" == "hevc" ]]; then
+        CMD+=("-adaptive_i:v" "1" "-adaptive_b:v" "1")
+    fi
 
     # Enforce color primaries metadata mapping to prevent color shifting during playback.
     [[ "$V_COLOR_PRI" =~ ^(bt709|bt2020|smpte170m)$ ]] && CMD+=("-color_primaries" "$V_COLOR_PRI")
