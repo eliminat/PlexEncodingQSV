@@ -151,32 +151,57 @@ if [[ -z "$V_WIDTH" ]]; then V_WIDTH=1920; fi
 if [[ -z "$V_HEIGHT" ]]; then V_HEIGHT=1080; fi
 
 # Detect if the video is black and white (monochrome)
+# Uses format metadata first, followed by multi-point distributed timeline saturation probing.
+# Avoids false positives from black screens, intros, cold opens, and mixed B&W scenes.
 IS_BW=false
 if [[ "$V_PIX_FMT" == gray* ]]; then
     IS_BW=true
     log_message "Format metadata confirmed: Video is grayscale."
 else
-    # Determine a safe seek point (avoiding black screens in intros)
-    SEEK_POINT=60
     DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$INPUT_VIDEO" | cut -d'.' -f1)
-    if [[ "$DURATION" =~ ^[0-9]+$ ]]; then
-        if [ "$DURATION" -le 120 ]; then
-            SEEK_POINT=$(( DURATION / 5 ))
-        else
-            SEEK_POINT=120
-        fi
+    
+    # Distributed timeline sampling points (percentages across duration)
+    SAMPLE_PCTS=(10 22 35 50 65 78 90)
+    SAMPLE_SEEK_POINTS=()
+    
+    if [[ "$DURATION" =~ ^[0-9]+$ ]] && [ "$DURATION" -gt 60 ]; then
+        for pct in "${SAMPLE_PCTS[@]}"; do
+            SAMPLE_SEEK_POINTS+=( $(( (DURATION * pct) / 100 )) )
+        done
+    elif [[ "$DURATION" =~ ^[0-9]+$ ]] && [ "$DURATION" -gt 10 ]; then
+        SAMPLE_SEEK_POINTS+=( $(( DURATION / 4 )) $(( DURATION / 2 )) $(( (DURATION * 3) / 4 )) )
+    else
+        SAMPLE_SEEK_POINTS=(30 60 120 240 480)
     fi
 
-    log_message "Analyzing color saturation at ${SEEK_POINT}s to detect B&W content..."
-    SATAVG=$(ffmpeg -nostdin -ss "$SEEK_POINT" -t 2 -i "$INPUT_VIDEO" -vf signalstats,metadata=print:key=lavfi.signalstats.SATAVG -f null - 2>&1 | \
-             grep "lavfi.signalstats.SATAVG" | cut -d'=' -f2 | \
-             awk '{sum+=$1; count++} END {if (count > 0) print sum/count; else print -1}')
+    log_message "Analyzing color saturation across ${#SAMPLE_SEEK_POINTS[@]} sample points to detect B&W content..."
+    MAX_SATAVG="0"
+    VALID_SAMPLES=0
+    
+    for SEEK_PT in "${SAMPLE_SEEK_POINTS[@]}"; do
+        SATAVG=$(ffmpeg -nostdin -ss "$SEEK_PT" -t 1 -i "$INPUT_VIDEO" -vf signalstats,metadata=print:key=lavfi.signalstats.SATAVG -f null - 2>&1 | \
+                 grep "lavfi.signalstats.SATAVG" | cut -d'=' -f2 | \
+                 awk '{sum+=$1; count++} END {if (count > 0) print sum/count; else print -1}')
+        
+        if (( $(echo "$SATAVG >= 0" | bc -l 2>/dev/null || echo 0) )); then
+            VALID_SAMPLES=$((VALID_SAMPLES + 1))
+            if (( $(echo "$SATAVG > $MAX_SATAVG" | bc -l 2>/dev/null || echo 0) )); then
+                MAX_SATAVG="$SATAVG"
+            fi
+            # Immediate early exit if meaningful color saturation is detected
+            if (( $(echo "$SATAVG >= 0.5" | bc -l 2>/dev/null || echo 0) )); then
+                IS_BW=false
+                break
+            fi
+        fi
+    done
 
-    if (( $(echo "$SATAVG >= 0 && $SATAVG < 0.5" | bc -l) )); then
+    if [ "$VALID_SAMPLES" -gt 0 ] && (( $(echo "$MAX_SATAVG < 0.5" | bc -l 2>/dev/null || echo 0) )); then
         IS_BW=true
-        log_message "Visual analysis confirmed: Video is Black & White (SATAVG: $SATAVG)."
+        log_message "Visual analysis confirmed: Video is Black & White (Max SATAVG: $MAX_SATAVG across $VALID_SAMPLES samples)."
     else
-        log_message "Visual analysis confirmed: Video is Color (SATAVG: $SATAVG)."
+        IS_BW=false
+        log_message "Visual analysis confirmed: Video is Color (Max SATAVG: $MAX_SATAVG)."
     fi
 fi
 
