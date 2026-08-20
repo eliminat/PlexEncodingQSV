@@ -113,3 +113,15 @@ Config B (extra_hw_frames=256, async_depth=16):  MD5=e047598db6d87f330508d62a1b4
 | **`-async_depth`** | `4` *(Default)* | Eliminates unneeded task synchronization handles; 80-frame lookahead already provides 100% GPU saturation. |
 | **`-thread_queue_size`** | `2048` | Prevents demuxing stalls on Blu-ray REMUXes without memory bloat. |
 | **Intermediate Staging** | `/dev/shm` (RAM-Disk) | Maximizes throughput and eliminates SSD write wear during active encoding passes. |
+| **B&W Saturation Probing** | 7-point distributed timeline sampling | Probes 10%, 22%, 35%, 50%, 65%, 78%, 90% with instant early-exit on color (`SATAVG >= 0.5`). Prevents false-positive quality downgrades from black screens, cold opens, and mixed B&W sequences. |
+
+---
+
+## 7. Monochrome & Color Saturation Detection Architecture
+
+### False Positive Prevention Mechanics
+* **Vulnerability of Single-Point Probing**: Sampling at a static timestamp (e.g. 120s) risks hitting cold-open scene cuts, black screens, or title cards where chroma saturation is 0 ($U=128, V=128$), resulting in false B&W detection and unwarranted ICQ target reduction on 4K content.
+* **Distributed Timeline Probing**: The pipeline evaluates 7 discrete points across the duration ($10\%, 22\%, 35\%, 50\%, 65\%, 78\%, 90\%$).
+* **Early-Exit Gate**: The first frame exhibiting color saturation ($\text{SATAVG} \ge 0.5$) immediately terminates the probe loop in $<100\text{ms}$ and classifies the media as Color (`IS_BW=false`).
+* **Mixed-Content Safeguard**: Media containing artistic B&W prologues, flashbacks, or alternating timelines are preserved at full color ICQ quality (`global_quality=25`), allowing the hardware encoder to naturally eliminate chroma bitrate during monochrome scenes without global quality penalties.
+
